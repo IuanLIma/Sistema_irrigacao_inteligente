@@ -1,120 +1,188 @@
-//Inclusão de bibliotecas
+//Bibliotecas
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <DHT11.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
 
-//Inclusão da pinagem 
+//Pinagem
 #define I2C_ADDR 0x27
 #define DHTPIN 4
 #define SOLO_PIN 34
 #define RELE_PIN 26
-#define BOTAO_PIN 27
 
-//Criação dos objetos
+//Objetos Criados
 DHT11 dht11(DHTPIN);
 LiquidCrystal_I2C lcd(I2C_ADDR, 16, 2);
 
-//Criação das variaveis
+//Variaveis
 int temperatura = 0;
 int umidadeAr = 0;
 int umidadeSolo = 0;
 
-//criação de variaveis do sistema
-bool estadoRele = false;
-bool ultimoEstadoBotao = HIGH;
-unsigned long ultimoDebounce = 0;
-const unsigned long delayDebounce = 50;
-unsigned long ultimoDHT = 0;
-const unsigned long intervaloDHT = 2000;
+bool irrigando = false;
 
-void setup() {
-  
-  //inicialização e Modo dos pinos
-  //Wire.begin(33, 32);
-  Serial.begin(115200);
-  pinMode(RELE_PIN, OUTPUT);
-  pinMode(BOTAO_PIN, INPUT_PULLUP);
-  digitalWrite(RELE_PIN, 0);
+//Wifi configurações
+const char* ssid = "Seu Wifi";
+const char* password = "Sua senha";
 
-  // Criação do menu de info
-  lcd.init();
-  lcd.backlight();
+const char* serverName = "http://SeuIP:5000/receber_dados";
+const char* confirmURL = "http://SeuIP:5000/confirmar_acao";
+
+//Controle
+unsigned long ultimoEnvio = 0;
+unsigned long intervaloEnvio = 0;
+
+int decision_id = -1;
+
+// Menu do display
+void menuPrincipal() {
+  lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("T:    C  S:   %");
+  lcd.print("T:    C S:   %");
   lcd.setCursor(0, 1);
-  lcd.print("U:    %");
+  lcd.print("U:    % I:");
 }
 
-void loop() {
+// Wifi
+void conectarWiFi() {
+  lcd.clear();
+  lcd.print("Conectando WiFi");
 
-  //Debouce do botão
+  WiFi.begin(ssid, password);
 
-  static bool estadoBotaoAtual = HIGH;
-  static bool estadoBotaoAnterior = HIGH;
-
-  bool leitura = digitalRead(BOTAO_PIN);
-
-  if (leitura != estadoBotaoAnterior) {
-    ultimoDebounce = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
   }
 
-  if ((millis() - ultimoDebounce) > delayDebounce) {
-    if (leitura != estadoBotaoAtual) {
-      estadoBotaoAtual = leitura;
+  lcd.clear();
+  lcd.print("WiFi OK");
+  delay(1000);
+}
 
-      if (estadoBotaoAtual == LOW) {
-        estadoRele = !estadoRele;
-        Serial.println(estadoRele ? "RELE: LIGADO" : "RELE: DESLIGADO");
-      }
-    }
-  }
+//Confirmação de acionamento
+void confirmarAcao(int decision_id, int action) {
+  HTTPClient http;
 
-  estadoBotaoAnterior = leitura;
+  lcd.clear();
+  lcd.print("Confirmando...");
 
-  //controle do rele
-  digitalWrite(RELE_PIN, estadoRele ? LOW : HIGH);
+  http.begin(confirmURL);
+  http.addHeader("Content-Type", "application/json");
 
-  //leitura da umidade do solo
+  String json = "{\"decision_id\":" + String(decision_id) +
+                ",\"action\":" + String(action) + "}";
+
+  http.POST(json);
+  http.end();
+}
+
+// leitura dos sesnores
+void lerSensores() {
   int leituraSolo = analogRead(SOLO_PIN);
   umidadeSolo = map(leituraSolo, 4095, 0, 0, 100);
   umidadeSolo = constrain(umidadeSolo, 0, 100);
-  
-  // Leitura e validação do DHT11
-  if (millis() - ultimoDHT > intervaloDHT) {
-    ultimoDHT = millis();
-    int result = dht11.readTemperatureHumidity(temperatura, umidadeAr);
-    if (result != 0) {
-      Serial.println("Erro ao ler DHT11");
-    }
-  }
 
-  // Atualização de variaveis no display
-  lcd.setCursor(2, 0);
-  lcd.print("    ");
+  dht11.readTemperatureHumidity(temperatura, umidadeAr);
+}
+
+// Atualização do display
+void atualizarLCD() {
+  menuPrincipal();
+
   lcd.setCursor(2, 0);
   lcd.print(temperatura);
 
   lcd.setCursor(12, 0);
-  lcd.print("   ");
-  lcd.setCursor(12, 0);
   lcd.print(umidadeSolo);
 
   lcd.setCursor(2, 1);
-  lcd.print("    ");
-  lcd.setCursor(2, 1);
   lcd.print(umidadeAr);
 
-  // Debug da serial para analise bruto dos dados
-  Serial.print("Temp: ");
-  Serial.print(temperatura);
-  Serial.print(" | Umidade Ar: ");
-  Serial.print(umidadeAr);
-  Serial.print(" | Solo: ");
-  Serial.print(umidadeSolo);
-  Serial.print(" | Leitura Bruta: ");
-  Serial.println(leituraSolo);
-
-  delay(100);
+  lcd.setCursor(13, 1);
+  if (irrigando) lcd.print("ON ");
+  else lcd.print("OFF");
 }
 
+// Envio da API
+void enviarParaAPI() {
+  if (WiFi.status() != WL_CONNECTED) return;
 
+  HTTPClient http;
+
+  lcd.clear();
+  lcd.print("Enviando API...");
+
+  http.begin(serverName);
+  http.addHeader("Content-Type", "application/json");
+
+  String json = "{";
+  json += "\"temperatura\":" + String(temperatura) + ",";
+  json += "\"umidade_ar\":" + String(umidadeAr) + ",";
+  json += "\"umidade_solo\":" + String(umidadeSolo);
+  json += "}";
+
+  int code = http.POST(json);
+
+  if (code > 0) {
+    String resposta = http.getString();
+
+    StaticJsonDocument<200> doc;
+    deserializeJson(doc, resposta);
+
+    int irrigar = doc["irrigar"];
+    decision_id = doc["decision_id"];
+
+    if (irrigar == 1) {
+      irrigando = true;
+
+      lcd.clear();
+      lcd.print("IRRIGANDO...");
+      digitalWrite(RELE_PIN, LOW);
+      delay(3000);
+      digitalWrite(RELE_PIN, HIGH);
+
+      confirmarAcao(decision_id, 1);
+
+      intervaloEnvio = 60000; // 1 min
+
+    } else {
+      irrigando = false;
+      intervaloEnvio = 3600000; // 1 hora
+    }
+  }
+
+  http.end();
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(RELE_PIN, OUTPUT);
+  digitalWrite(RELE_PIN, HIGH);
+
+  lcd.init();
+  lcd.backlight();
+
+  conectarWiFi();
+
+  // PRIMEIRA LEITURA
+  lerSensores();
+  enviarParaAPI();
+  ultimoEnvio = millis();
+}
+
+void loop() {
+
+  lerSensores();
+  atualizarLCD();
+
+  if (millis() - ultimoEnvio > intervaloEnvio) {
+    ultimoEnvio = millis();
+    enviarParaAPI();
+  }
+
+  delay(500);
+}
